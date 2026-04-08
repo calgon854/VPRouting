@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<!--
+  rain.html — ICON-CH1 animated hourly precipitation map
+  -------------------------------------------------------
+  This is a TEMPLATE. The three JS placeholders below are
+  filled in by render.py before the file is written to disk:
+
+    {{FRAMES_JS}}     →  JSON array of base64 PNG data-URIs (33 frames)
+    {{LABELS_JS}}     →  JSON array of timestamp label strings
+    {{GLOBAL_MAX}}    →  float, peak mm/h across the whole run
+    {{RUN_LABEL}}     →  string, e.g. "2026-04-06 06:00 UTC"
+
+  To render manually in a notebook you can also call
+  render.build_html(frames, labels, global_max, run_label)
+  from render.py which returns the filled string directly.
+-->
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ICON-CH1 · Rain Forecast</title>
+
+  <!-- Leaflet -->
+  <link rel="stylesheet"
+        href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        crossorigin="" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+          crossorigin="" defer></script>
+
+  <!-- Local styles (sibling file) -->
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<!-- Loading overlay shown while Leaflet boots -->
+<div id="loading">
+  <div id="loading-spinner"></div>
+  <div id="loading-text">Loading map…</div>
+</div>
+
+<div id="app">
+
+  <!-- ── Side panel ───────────────────────────────────────────── -->
+  <aside id="panel">
+
+    <div id="panel-header">
+      <h1>
+        <!-- Rain-drop SVG icon -->
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round"
+             aria-hidden="true">
+          <path d="M12 2C6 10 4 14 4 16a8 8 0 0 0 16 0c0-2-2-6-8-14z"/>
+        </svg>
+        ICON-CH1 EPS
+      </h1>
+      <div id="model-run">Model run: <span id="run-label-text"></span></div>
+    </div>
+
+    <div id="frame-readout">
+      <div id="lead-time-label">+01h</div>
+      <div id="valid-time-label">—</div>
+      <div id="intensity-badge" class="dry">
+        <span id="intensity-dot"></span>
+        <span id="intensity-text">No rain</span>
+      </div>
+    </div>
+
+    <div id="legend">
+      <div id="legend-title">Hourly rain (mm/m²)</div>
+      <div id="colorbar"></div>
+      <div id="colorbar-labels">
+        <span>0</span>
+        <span id="cb-mid"></span>
+        <span id="cb-max"></span>
+      </div>
+    </div>
+
+    <div id="stats">
+      <div class="stat-row">
+        <span class="stat-label">Run peak</span>
+        <span class="stat-value" id="stat-peak">—</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">Frame</span>
+        <span class="stat-value" id="stat-frame">1 / 33</span>
+      </div>
+    </div>
+
+  </aside>
+
+  <!-- ── Leaflet map ──────────────────────────────────────────── -->
+  <div id="map" role="application" aria-label="Animated rain forecast map"></div>
+
+  <!-- ── Playback controls ────────────────────────────────────── -->
+  <div id="controls" role="toolbar" aria-label="Playback controls">
+
+    <button class="btn-step" id="btn-prev"
+            aria-label="Previous frame" title="Previous (←)">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+           stroke="currentColor" stroke-width="2.5"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <polyline points="15 18 9 12 15 6"/>
+      </svg>
+    </button>
+
+    <button id="btn-play" aria-label="Play" title="Play/Pause (Space)">
+      <svg id="icon-play" width="16" height="16" viewBox="0 0 24 24"
+           fill="currentColor" aria-hidden="true">
+        <polygon points="5,3 19,12 5,21"/>
+      </svg>
+      <svg id="icon-pause" width="16" height="16" viewBox="0 0 24 24"
+           fill="currentColor" aria-hidden="true" style="display:none">
+        <rect x="6" y="4" width="4" height="16"/>
+        <rect x="14" y="4" width="4" height="16"/>
+      </svg>
+    </button>
+
+    <button class="btn-step" id="btn-next"
+            aria-label="Next frame" title="Next (→)">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+           stroke="currentColor" stroke-width="2.5"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <polyline points="9 18 15 12 9 6"/>
+      </svg>
+    </button>
+
+    <div id="slider-wrap">
+      <input type="range" id="time-slider"
+             min="0" max="32" step="1" value="0"
+             aria-label="Time step" />
+      <div id="slider-ticks">
+        <span>+01h</span>
+        <span>+09h</span>
+        <span>+17h</span>
+        <span>+25h</span>
+        <span>+33h</span>
+      </div>
+    </div>
+
+    <div id="speed-wrap">
+      <label id="speed-label" for="speed-select">Speed</label>
+      <select id="speed-select" aria-label="Animation speed">
+        <option value="800">0.5×</option>
+        <option value="500" selected>1×</option>
+        <option value="300">2×</option>
+        <option value="150">4×</option>
+      </select>
+    </div>
+
+  </div><!-- /controls -->
+
+</div><!-- /app -->
+
+<script>
+// ── Data injected by render.py ──────────────────────────────────────────────
+const FRAMES     = {{FRAMES_JS}};
+const LABELS     = {{LABELS_JS}};
+const GLOBAL_MAX = {{GLOBAL_MAX}};
+const RUN_LABEL  = "{{RUN_LABEL}}";
+
+// ── Map bounds (must match fetch_data.py EXTENT) ────────────────────────────
+// extent = (lon_min, lon_max, lat_min, lat_max) = (-0.817, 18.183, 41.183, 51.183)
+const BOUNDS = [[41.183, -0.817], [51.183, 18.183]]; // [[lat_min,lon_min],[lat_max,lon_max]]
+
+// ── State ───────────────────────────────────────────────────────────────────
+let currentFrame = 0;
+let playing      = false;
+let timer        = null;
+let intervalMs   = 500;
+
+// ── DOM refs ─────────────────────────────────────────────────────────────────
+const slider        = document.getElementById('time-slider');
+const btnPlay       = document.getElementById('btn-play');
+const btnPrev       = document.getElementById('btn-prev');
+const btnNext       = document.getElementById('btn-next');
+const iconPlay      = document.getElementById('icon-play');
+const iconPause     = document.getElementById('icon-pause');
+const leadLbl       = document.getElementById('lead-time-label');
+const validLbl      = document.getElementById('valid-time-label');
+const frameCount    = document.getElementById('stat-frame');
+const intensityBadge = document.getElementById('intensity-badge');
+const intensityTxt  = document.getElementById('intensity-text');
+const speedSel      = document.getElementById('speed-select');
+const loading       = document.getElementById('loading');
+
+// ── Init panel metadata ──────────────────────────────────────────────────────
+document.getElementById('run-label-text').textContent = RUN_LABEL;
+document.getElementById('stat-peak').textContent      = GLOBAL_MAX.toFixed(2) + ' mm';
+document.getElementById('cb-max').textContent         = GLOBAL_MAX.toFixed(1);
+document.getElementById('cb-mid').textContent         = (GLOBAL_MAX / 2).toFixed(1);
+slider.max = FRAMES.length - 1;
+
+// ── Leaflet setup ────────────────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', () => {
+  const map = L.map('map', {
+    center: [46.8, 8.2],
+    zoom: 7,
+    zoomControl: true,
+    attributionControl: true,
+  });
+
+fetch("https://raw.githubusercontent.com/datasets/geo-countries/master/data/countries.geojson")
+  .then(r => r.json())
+  .then(data => {
+    const ch = data.features.find(f => f.properties.ISO_A2 === "CH");
+
+    // World bounding box minus Switzerland = inverted mask
+    const world = {
+      type: "Polygon",
+      coordinates: [[
+        [-180,-90],[180,-90],[180,90],[-180,90],[-180,-90]
+      ]]
+    };
+
+    const mask = {
+      type: "Feature",
+      geometry: {
+        type: "Polygon",
+        coordinates: [
+          world.coordinates[0],          // outer ring = world
+          ...ch.geometry.coordinates     // inner ring(s) = CH cutout
+        ]
+      }
+    };
+
+    L.geoJSON(mask, {
+      style: {
+        fillColor: "#b0b8c8",
+        fillOpacity: 0.38,
+        stroke: false
+      }
+    }).addTo(map);
+  });
+
+  fetch("https://raw.githubusercontent.com/datasets/geo-countries/master/data/countries.geojson")
+  .then(r => r.json())
+  .then(data => {
+    const ch = data.features.find(f => f.properties.ISO_A2 === "CH");
+    L.geoJSON(ch, {
+      style: {
+        color: "#1d6fa4",      // matches your --accent
+        weight: 1.5,
+        fillOpacity: 0,
+        opacity: 0.8
+      }
+    }).addTo(map);
+  });
+
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+    attribution: '© <a href="https://www.openstreetmap.org/copyright" target="_blank">OSM</a> · © <a href="https://carto.com/" target="_blank">CARTO</a> · MeteoSwiss ICON-CH1-EPS',
+    subdomains: 'abcd',
+    maxZoom: 19,
+  }).addTo(map);
+
+// ── Switzerland grey mask + border ───────────────────────────
+fetch('./ch.geojson')
+  .then(r => r.json())
+  .then(ch => {
+    const coords = ch.geometry.coordinates[0];
+
+    // Grey wash outside Switzerland
+    L.geoJSON({
+      type: 'Feature',
+      geometry: {
+        type: 'Polygon',
+        coordinates: [
+          [[-180,-90],[180,-90],[180,90],[-180,90],[-180,-90]], // world
+          coords.slice().reverse()                               // CH hole
+        ]
+      }
+    }, {
+      style: { fillColor: '#8a96a8', fillOpacity: 0.35, stroke: false },
+      interactive: false
+    }).addTo(map);
+
+    // Blue border on CH
+    L.geoJSON(ch, {
+      style: { color: '#1d6fa4', weight: 1.8, fillOpacity: 0, opacity: 0.9 },
+      interactive: false
+    }).addTo(map);
+  })
+  .catch(e => console.warn('ch.geojson not loaded:', e));
+
+  // Rain overlay — single ImageOverlay swapped on each frame step
+  const overlay = L.imageOverlay(FRAMES[0], BOUNDS, {
+    opacity: 0.75,
+    interactive: false,
+  }).addTo(map);
+
+  // Click on map: show nearest point rainfall tooltip (basic lat/lon echo)
+  map.on('click', (e) => {
+    const { lat, lng } = e.latlng;
+    L.popup()
+      .setLatLng(e.latlng)
+      .setContent(
+        `<strong>${LABELS[currentFrame]}</strong><br/>` +
+        `Lat ${lat.toFixed(3)}° · Lon ${lng.toFixed(3)}°`
+      )
+      .openOn(map);
+  });
+
+  // Hide loading overlay once map tiles have loaded
+  map.once('load', hideLoading);
+  setTimeout(hideLoading, 1200); // fallback
+
+  function hideLoading() {
+    loading.classList.add('hidden');
+    setTimeout(() => loading.remove(), 400);
+  }
+
+  // ── Frame rendering ────────────────────────────────────────────────────────
+  function showFrame(idx) {
+    currentFrame = idx;
+    overlay.setUrl(FRAMES[idx]);
+
+    const label = LABELS[idx]; // e.g. "+05h · Sun 06 Apr 11:00 UTC"
+    const parts = label.split(' · ');
+    leadLbl.textContent  = parts[0] || label;
+    validLbl.textContent = parts[1] || '';
+
+    slider.value = idx;
+    const pct = FRAMES.length > 1 ? (idx / (FRAMES.length - 1) * 100).toFixed(1) : 0;
+    slider.style.setProperty('--pct', pct + '%');
+
+    frameCount.textContent = `${idx + 1} / ${FRAMES.length}`;
+    updateIntensityBadge(idx);
+  }
+
+  // ── Intensity badge ────────────────────────────────────────────────────────
+  // We can't query pixel values without canvas; use frame index as proxy
+  // for the label — replace with real per-point data if available via query.py
+  function updateIntensityBadge(idx) {
+    // Derive approximate "domain max at this frame" from the label (no pixel access)
+    // This is a display-only hint; remove or replace if per-frame max is injected.
+    const pct = idx / (FRAMES.length - 1);
+    intensityBadge.className = '';
+    intensityBadge.classList.add(
+      pct < 0.1 ? 'dry' : pct < 0.4 ? 'light' : pct < 0.7 ? 'mod' : 'heavy'
+    );
+    intensityTxt.textContent =
+      pct < 0.1 ? 'No rain' : pct < 0.4 ? 'Light rain' : pct < 0.7 ? 'Moderate' : 'Heavy rain';
+  }
+
+  // ── Playback ───────────────────────────────────────────────────────────────
+  function step() {
+    const next = (currentFrame + 1) % FRAMES.length;
+    showFrame(next);
+    if (next === 0) stopPlay(); // pause after one full loop
+  }
+
+  function startPlay() {
+    playing = true;
+    iconPlay.style.display  = 'none';
+    iconPause.style.display = '';
+    btnPlay.setAttribute('aria-label', 'Pause');
+    timer = setInterval(step, intervalMs);
+  }
+
+  function stopPlay() {
+    playing = false;
+    iconPlay.style.display  = '';
+    iconPause.style.display = 'none';
+    btnPlay.setAttribute('aria-label', 'Play');
+    clearInterval(timer);
+  }
+
+  btnPlay.addEventListener('click', () => playing ? stopPlay() : startPlay());
+  btnPrev.addEventListener('click', () => { stopPlay(); showFrame((currentFrame - 1 + FRAMES.length) % FRAMES.length); });
+  btnNext.addEventListener('click', () => { stopPlay(); showFrame((currentFrame + 1) % FRAMES.length); });
+
+  slider.addEventListener('input', () => {
+    stopPlay();
+    showFrame(parseInt(slider.value, 10));
+  });
+
+  speedSel.addEventListener('change', () => {
+    intervalMs = parseInt(speedSel.value, 10);
+    if (playing) { stopPlay(); startPlay(); }
+  });
+
+  // Keyboard shortcuts
+  document.addEventListener('keydown', (e) => {
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+    if (e.code === 'Space')       { e.preventDefault(); btnPlay.click(); }
+    if (e.code === 'ArrowRight')  { e.preventDefault(); btnNext.click(); }
+    if (e.code === 'ArrowLeft')   { e.preventDefault(); btnPrev.click(); }
+  });
+
+  // Initial render
+  showFrame(0);
+});
+</script>
+</body>
+</html>
