@@ -31,6 +31,7 @@ print(query_points(ds, locs[["name","lat","lon"]]))
 import numpy as np
 import xarray as xr
 import pandas as pd
+from scipy.spatial import cKDTree
 
 DEFAULT_FILE = "total_0-33.nc"
 EPS_SLICE    = slice(1, 10)   # perturbed members used for probability
@@ -52,18 +53,21 @@ def _nearest_yx_batch(da: xr.DataArray,
                       lats: np.ndarray,
                       lons: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """
-    Vectorised nearest-neighbour for N locations at once.
-    Broadcasting: (y, x, 1) vs (1, 1, N) → dist (y, x, N).
-    Returns (iy, ix) each of shape (N,).
+    Nearest-neighbour search using a KD-Tree for extreme speed and low memory.
     """
-    grid_lat = da.lat.values   # (y, x)
-    grid_lon = da.lon.values   # (y, x)
-    dist = np.sqrt(
-        (grid_lat[:, :, None] - lats[None, None, :]) ** 2 +
-        (grid_lon[:, :, None] - lons[None, None, :]) ** 2
-    )                          # (y, x, N)
-    flat_idx = dist.reshape(-1, len(lats)).argmin(axis=0)  # (N,)
-    iy, ix   = np.unravel_index(flat_idx, grid_lat.shape)
+    grid_lat = da.lat.values
+    grid_lon = da.lon.values
+    
+    # Flatten grid coordinates into shape (N_grid_points, 2)
+    grid_coords = np.column_stack((grid_lat.ravel(), grid_lon.ravel()))
+    target_coords = np.column_stack((lats, lons))
+    
+    # Build tree and query nearest neighbors
+    tree = cKDTree(grid_coords)
+    _, flat_idx = tree.query(target_coords)
+    
+    # Convert 1D indices back to 2D grid indices
+    iy, ix = np.unravel_index(flat_idx, grid_lat.shape)
     return iy, ix
 
 
